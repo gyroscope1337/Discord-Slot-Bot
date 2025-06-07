@@ -1,0 +1,268 @@
+import datetime
+import discord
+import asyncio
+import random
+import pytz
+import json
+import os
+
+from discord.ext import commands
+from discord.ext import tasks
+
+
+
+class Slot_Bot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        #Adding Variables
+        self.rules = [
+            "➥ Only 2 `@here` pings per day.",
+            "➥ No `@everyone` or role ping allowed.",
+            "➥ No Refunds on private slot.",
+            "➥ You can't sell or share your slot.",
+            "➥ Any kind of promotion is not allowed.",
+            "➥ Gambling/Money-doubling is not allowed.",
+            "➥ You need 40+ vouches in `@Shiba#2732` to post your autobuy links.",
+            "```\nNotes:\n  - Any kind of rule violation will result in slot revoke without refund.\n  - The time for ping reset is IST (Indian Standard Time) [GMT +5:30]```"]
+        with open("cache.json", "r") as fp:
+            self.last_save = json.load(fp)
+            self.counts = self.last_save["counts"].copy()
+            self.reset_date = self.time(datetime.datetime.strptime(self.last_save["reset_date"], "%d-%m-%Y"))
+        
+        super().__init__(*args, **kwargs)
+    
+    
+    @commands.Cog.listener("on_message")
+    async def on_message(self, message):
+        channel = message.channel
+        content = message.content
+        user = message.author
+        
+        if message.guild and not user.bot:
+            if "@everyone" in content and channel.category_id == 1263486468605870119:
+                if not user.guild_permissions.administrator:
+                    await channel.set_permissions(
+                        user,
+                        send_messages=False,
+                        read_message_history=False,
+                        mention_everyone=False)
+                
+                    embed=discord.Embed(
+                        color=discord.Color.red(),
+                        description=f"Revoked Slot | Reason: Everyone ping")
+                    try:
+                        await user.create_dm()
+                        await user.send(embed=embed)
+                    except:
+                        pass
+                    return await channel.send(embed=embed)
+
+                elif user.guild_permissions.administrator:
+                    embed=discord.Embed(
+                        color=discord.Color.red(),
+                        description=f"Can't revoke Slot, User is Admin")
+                    return await channel.send(embed=embed)
+
+            #Check if the message contains @here
+            if "@here" in content and channel.category_id == 1263486468605870119:
+                self.last_save["overall"] = self.last_save.get("overall", 0) + 1
+                self.counts[str(user.id)] = self.counts.get(str(user.id), 0) + 1
+                
+                if self.counts.get(str(user.id), 0) > 2:
+                    #Remove send message permission from the channel and send a notification
+                    await channel.set_permissions(user, send_messages=False)
+                    embed = discord.Embed(
+                        description=f"**{user}, Your Slot Has been Revoked for using 3x Here Pings.**",
+                        color=discord.Color.red())
+                    try:
+                        await user.create_dm()
+                        await user.send(embed=embed)
+                    except:
+                        pass
+                    embed = discord.Embed(
+                        color=discord.Color.red(),
+                        description="Revoked Slot | Reason: Used more than 2x Here Ping")
+                    return await channel.send(embed=embed)
+                    
+                embed = discord.Embed(
+                    description=f'{user}, you have used **{self.counts[str(user.id)]}/2** Pings. | **Use MM**',
+                    color=0x2f3136)
+                return await channel.send(embed=embed)
+            await self.process_commands(message)
+
+
+    async def on_ready(self):
+        os.system("clear")
+        print(f"Successfully connected as {self.user}")
+        await self.reset_count.start()
+        await self.save_count.start()
+        
+        
+    # Returns Indian Time
+    def time(self, time_to_localize=None):
+        timezone = pytz.timezone('Asia/Kolkata')
+        if time_to_localize:
+            return timezone.localize(time_to_localize)
+        return datetime.datetime.now(timezone)
+        
+        
+    # Reset and Save mention counts
+    @tasks.loop(minutes=3)
+    async def reset_count(self):
+        now = self.time()
+        if now >= self.reset_date:
+            self.reset_date = now + datetime.timedelta(days=1)
+            self.last_save["counts"] = {}
+            self.last_save["reset_date"] = self.reset_date.strftime("%d-%m-%Y")
+            self.counts = {}
+            with open("cache.json", "w") as fp:
+                json.dump(self.last_save, fp, indent=4)
+
+
+    @tasks.loop(seconds=30)
+    async def save_count(self):
+        if self.counts != self.last_save["counts"]:
+            self.last_save["counts"] = self.counts
+            with open("cache.json", "w") as fp:
+                json.dump(self.last_save, fp, indent=4)
+                
+                
+    @reset_count.before_loop
+    async def before_reset(self):
+        await self.wait_until_ready()
+        
+    @save_count.before_loop
+    async def before_save(self):
+        await self.wait_until_ready()
+        
+
+
+
+bot = Slot_Bot(
+    command_prefix='-',
+    intents=discord.Intents.all()
+)
+
+
+# Commands #
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def slot(ctx, user: discord.Member, slot_name: str, duration: str='1w'):
+    category = discord.utils.get(ctx.guild.categories, id=1263486468605870119)
+    channel = await category.create_text_channel(slot_name)
+
+    # Setting default permissions
+    await channel.set_permissions(ctx.guild.default_role, view_channel=True, send_messages=False)
+    await channel.set_permissions(user, view_channel=True, send_messages=True, mention_everyone=True)
+    
+    # Parse duration and calculate expiry date
+    if duration.endswith('w'):
+        duration_days = int(duration[:-1]) * 7
+        duration_text = f"{int(duration[:-1])} weeks"
+       
+    elif duration.endswith('m'):
+        duration_days = int(duration[:-1]) * 30
+        duration_text = f"{int(duration[:-1])} months"
+     
+    else:
+        try:
+            duration_days = int(duration)
+            duration_text = f"{duration_days} days"
+        except:
+            return await ctx.send("Invalid duration type.\n\n>>> **Valid examples:** `1w`, `7d`, `7`")
+    purchase_date = bot.time()
+    expiry_date = purchase_date + datetime.timedelta(days=duration_days)
+
+    embed = discord.Embed(
+        title="Slot Created",
+        description=f"Slot channel for `{user}` has been created.",
+        color=discord.Color.green()
+    )
+    await ctx.send(embed=embed)
+
+    details = discord.Embed(
+        title="Slot Details",
+        color=discord.Color.green(),
+        description="\n".join([
+            f"**Purchase Date:** {purchase_date.strftime('%d-%m')}\n"
+            f"**Duration:** **{duration_days} days | {duration_text}**\n"
+            f"**Expiry Date:** {expiry_date.strftime('%d-%m')}"])
+     )
+    details.add_field(
+        name="Permissions",
+        value="```2X @here pings```",
+        inline=False)
+    details.add_field(
+        name="Rule 1",
+        value="**Must** follow the slot rules strictly.",
+        inline=False)
+    details.add_field(
+        name="Rule 2",
+        value="**Must** Always accept MM (Middle Man).",
+        inline=False)
+    rules = discord.Embed(
+        title='**SLOT RULES**',
+        color=0x2f3136,
+        description="\n".join(bot.rules))
+    rules.set_footer(text="Scamming will result in slot revoke without refund.")
+    embeds = [details, rules]
+    await channel.send(embeds=embeds)
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def add(ctx, user: discord.Member, channel: discord.TextChannel=None):
+    channel = channel or ctx.channel
+    # Add a user to the specified channel
+    await channel.set_permissions(user, send_messages=True, embed_links=True, mention_everyone=True, view_channel=True)
+    embed = discord.Embed(
+        title="User Added",
+        description=f"Added `{user}` in {channel.mention}.",
+        color=discord.Color.blue())
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def revoke(ctx, user: discord.Member, channel: discord.TextChannel=None):
+    channel = channel or ctx.channel
+    # Remove send message permission
+    await channel.set_permissions(user, send_messages=False)
+    embed = discord.Embed(
+        title=f"Slot Revoked by `{ctx.author}`",
+        description=f"{user}'s Slot has been Revoked.",
+        color=discord.Color.red())
+    try:
+        await user.create_dm()
+        await user.send(f"Your Slot has been revoked by `{ctx.author}`!")
+    except:
+        pass
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def hold(ctx, user: discord.Member, channel: discord.TextChannel=None):
+    channel = channel or ctx.channel
+    # Remove send message permission
+    await channel.set_permissions(user, send_messages=False)
+    embed = discord.Embed(
+        title="Slot on Hold",
+        description=f"{user}'s Slot is on Hold Now.",
+        color=discord.Color.orange())
+    await ctx.send(embed=embed)
+
+
+@bot.command(aliases=["srules", "slotrules"])
+@commands.has_permissions(administrator=True)
+async def slot_rules(ctx, channel: discord.TextChannel=None):
+    channel = channel or ctx.channel
+            
+    embed = discord.Embed(
+        title='**SLOT RULES**',
+        color=0x2f3136,
+        description="\n".join(bot.rules))
+    embed.set_footer(text="Scamming will result in slot revoke without refund.")
+    await channel.send(embed=embed)
+
+
+bot.run('YOUR_TOKEN')
